@@ -21,21 +21,68 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct GPIO_Name {
+  GPIO_TypeDef *port;
+  uint16_t pin;
+} GPIO_Name;
+
+typedef struct {
+  // previous state
+  float  Ui_previous;
+  float  Ud_previous;
+  float  ek_previous;
+
+  // control parameters
+  float  Ts;
+  float  Kp;
+  float  Ki;
+  float  Kd;
+  float  alpha;
+  float  Kb;
+
+  // Don't want this to be modified
+  const bool  allow_filter;
+  const bool  allow_windup;
+} PIDState;
+
+typedef struct {
+  float Total_PID;       // Final saturated output
+  uint8_t dir;          // Direction of control, 1: forward, 0: reverse
+} PIDOutputType;
+
+typedef struct {
+  int previous_encoder_state;
+  int encoder_res;
+  long revolutions;
+  int counter;
+
+  int Counter_Vec;
+  float Current_Vec;
+} EncoderState;
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define PI        3.14159
+#define MAX_SPEED 331  // rad/s
+#define PI2REV    (PI / 2000)
 
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+// macros for change duty cycle in control program
+#define set_duty(duty) __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, duty);
 
 /* USER CODE END PM */
 
@@ -46,6 +93,37 @@ TIM_HandleTypeDef htim5;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+// naming pin
+GPIO_Name Encoder_Channel_A = {GPIOB, GPIO_PIN_4};
+GPIO_Name Encoder_Channel_B = {GPIOB, GPIO_PIN_6};
+GPIO_Name DIR_Port = {GPIOA, GPIO_PIN_8};
+
+// State of Encoder
+EncoderState encoder = {.previous_encoder_state = 0b00,
+                          .encoder_res = 4000,
+                          .revolutions = 0,
+                          .counter = 0,
+                          .Counter_Vec = 0,
+                          .Current_Vec = 0};
+
+// initialize the PID controller parameter
+PIDState velocity_pid = {
+  .Ui_previous = 0,
+  .Ud_previous = 0,
+  .ek_previous = 0,
+  .Ts = (float)0.01,
+  .Kp = 1,
+  .Ki = 1,
+  .Kd = 0,
+  .alpha = 0,
+  .Kb = 1,
+  .allow_filter = false,
+  .allow_windup = true
+};
+
+uint8_t* Rx_data;
+// Set points
+float set_point_velocity = 0;
 
 /* USER CODE END PV */
 
@@ -314,6 +392,207 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+/**
+  * @brief Digital PID function for Discrete system
+  * @param pid_state: PID State that store previous state like ek, Ui, Ud (if filter is allowed) and control parameters of that PID like Kp, Ki, Kd, filter and anti wind-up param like alpha, Kb. This variable is made static so that the previous state can be directly modified inside this function.
+  * @param set_point: This variable have type double. In Position control, this value is the relative distance with respect to the base point (Global base), therefore, it should have type float to represent real number. In velocity control, this values feature speed we want motor to reach, in such scenarios that speed of motor is controlled by Duty cycle of H-Bridge, we would want this to be the value of TIM->CCRx (uint16_t).
+  * @param current: same as set_point, store the current velocity or relative distance.
+  * @param ref_val: reference output for PID. In Position control, we have the output of this PID to be the speed (rad/s) and in Velocity control, this value is the maximum CCR (TIM->ARR)
+  * @retval PIDOutputType
+  */
+PIDOutputType digital_PID(PIDState *pid_state,          // Store previous state of Digital PID and control params
+                          const float set_point,         // set point for system
+                          const float current,           // current value (velocity or distance)
+                          const float ref_val)           // reference value (speed or Duty)
+{
+  // compute error
+  const float ek = set_point - current;
+
+  // compute partial terms
+  const float Up = pid_state->Kp * ek;
+  float Ui = pid_state->Ui_previous + pid_state->Ki * ek * pid_state->Ts;
+  float Ud = pid_state->Kd * (ek - pid_state->ek_previous) / pid_state->Ts;
+
+  // Activate filter (if allowed)
+  if (pid_state->allow_filter)
+  {
+    Ud = pid_state->Ud_previous * (1 - pid_state->alpha) + pid_state->alpha * Ud;
+    pid_state->Ud_previous = (float)Ud;
+  }
+
+  // total compute value
+    float Total_PID = Up + Ui + Ud;
+
+  // Activate anti-windup (if allowed)
+  if (pid_state->allow_windup)
+  {
+    double e_reset = 0;
+    if (Total_PID < -ref_val)
+    {
+      e_reset = -ref_val - Total_PID;
+    }
+    else if (Total_PID > ref_val)
+    {
+      e_reset = Total_PID - ref_val;
+    }
+    Ui = (float)(Ui + pid_state->Kb * e_reset * pid_state->Ts);
+  }
+
+  // update state for next call
+  pid_state->Ui_previous = Ui;
+  pid_state->ek_previous = ek;
+
+  // Saturate the output
+  uint8_t _dir = 1;   // forward direction
+  if (Total_PID < 0)
+  {
+    Total_PID = -Total_PID;
+    _dir ^= 1;
+  }
+  if (Total_PID > ref_val)
+    Total_PID = ref_val;
+
+  return (PIDOutputType){Total_PID, _dir};
+}
+
+
+// external interrupt callback to update the distance
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  // Handle EXTERNAL interrupts for Channel A and Channel B (PB4, PB6)
+  if (GPIO_Pin == GPIO_PIN_4 || GPIO_Pin == GPIO_PIN_6)
+  {
+    // Update State of encoder
+    char encoder_state =
+            ((HAL_GPIO_ReadPin(Encoder_Channel_A.port, Encoder_Channel_A.pin) == GPIO_PIN_SET) << 1) |
+            ((HAL_GPIO_ReadPin(Encoder_Channel_B.port, Encoder_Channel_B.pin) == GPIO_PIN_SET) << 0);
+
+    // Check the transition between previous and current states to determine rotation direction
+    switch (encoder_state)
+    {
+    case 0b00:
+      if (encoder.previous_encoder_state == 0b01)       // 0 | 1 --> 0 | 0
+          encoder.counter++;
+      else if (encoder.previous_encoder_state == 0b10)  // 1 | 0 --> 0 | 0
+          encoder.counter--;
+      break;
+
+    case 0b01:
+      if (encoder.previous_encoder_state == 0b11)       // 1 | 1 --> 0 | 1
+          encoder.counter++;
+      else if (encoder.previous_encoder_state == 0b00)  // 0 | 0 --> 0 | 1
+          encoder.counter--;
+      break;
+
+    case 0b10:
+      if (encoder.previous_encoder_state == 0b00)       // 0 | 0 --> 1 | 0
+          encoder.counter++;
+      else if (encoder.previous_encoder_state == 0b11)  // 1 | 1 --> 1 | 0
+          encoder.counter--;
+      break;
+
+    case 0b11:
+      if (encoder.previous_encoder_state == 0b10)       // 1 | 0 --> 1 | 1
+          encoder.counter++;
+      else if (encoder.previous_encoder_state == 0b01)  // 0 | 1 --> 1 | 1
+          encoder.counter--;
+      break;
+
+    // Should not fall into this case
+    default:
+        break;
+    }
+    // Handle out of range (Encoder's Resolution)
+    if (encoder.counter >= encoder.encoder_res)
+    {
+      encoder.counter = 0;
+      encoder.revolutions ++;
+    }
+    if (encoder.counter <= -encoder.encoder_res)
+    {
+      encoder.counter = 0;
+      encoder.revolutions --;
+    }
+    // Update the previous state for the next rotation step
+    encoder.previous_encoder_state = encoder_state;
+    encoder.Counter_Vec++;
+  }
+}
+
+void compute_velocity(void)
+{
+    const int CntTmp = encoder.Counter_Vec;
+    encoder.Counter_Vec = 0;
+
+    encoder.Current_Vec = (float)((float)CntTmp * PI / 10);
+}
+
+// TIM4 interrupt to run PI on velocity
+// TIM5 interrupt to run PID on distance
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM5)     // transmit data using TIM5 Interrupt
+    {
+        // Compute velocity
+        compute_velocity();
+
+    	// Compute PID
+    	PIDOutputType vec_result = digital_PID(&velocity_pid, set_point_velocity, encoder.Current_Vec, 1599);
+
+    	// set direction
+    	if (vec_result.dir == 1)
+    	{
+    		HAL_GPIO_WritePin(DIR_Port.port, DIR_Port.pin, GPIO_PIN_SET);
+    	}
+    	else
+    	{
+    		HAL_GPIO_WritePin(DIR_Port.port, DIR_Port.pin, GPIO_PIN_RESET);
+    	}
+
+    	// set velocity
+    	set_duty(int(vec_result.Total_PID * 1599))
+
+    	// transmit the velocity
+    	char buffer_vec[0xF] = {0};
+    	sprintf(buffer_vec, "V%.2f\r\n", vec_result.Total_PID);
+    	HAL_UART_Transmit(&huart1, buffer_vec, strlen(buffer_vec), 8);
+    }
+}
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        switch (Rx_data[0]) {
+            case 'r':
+                // Start
+                break;
+            case 'e':
+                // Stop
+                break;
+            case 'g':
+                // resume (after pause)
+                break;
+            case 'f':
+                // pause
+                break;
+            case 'a':
+                // set vec and pos
+                int i;
+                uint8_t buffer_vec[0xF] = {0};
+                i = 0;
+                while (buffer_vec[i] != 's')
+                    HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
+
+                buffer_vec[0] = 0;
+                i = 0;
+                while (buffer_vec[i] != 'v')
+                    HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
+
+                set_point_velocity = (float)strtod((char *)buffer_vec + 1, NULL);
+                break;
+        }
+    }
+}
 /* USER CODE END 4 */
 
 /**
