@@ -551,7 +551,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     	}
 
     	// set velocity
-    	set_duty(int(vec_result.Total_PID * 1599))
+    	set_duty((int)(vec_result.Total_PID * 1599))
 
     	// transmit the velocity
     	char buffer_vec[0xF] = {0};
