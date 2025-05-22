@@ -75,8 +75,9 @@ typedef struct {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define PI        3.14159
-#define MAX_SPEED 331  // rad/s
 #define PI2REV    (PI / 2000)
+#define MAX_DISTANCE 1000
+#define MAX_SPEED 331  // rad/s
 
 /* USER CODE END PD */
 
@@ -191,22 +192,24 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  // MX_TIM3_Init();
-  // MX_TIM4_Init();
-  // MX_TIM5_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM5_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+
   // Start TIMER interrupt
-  // HAL_TIM_Base_Start_IT(&htim4);
+  HAL_TIM_Base_Start_IT(&htim4);
   // HAL_TIM_Base_Start_IT(&htim5);
 
   // Start TIMER PWM mode
-  // HAL_GPIO_WritePin(DIR_Port.port, DIR_Port.pin, GPIO_PIN_RESET);
-  // HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-  // set_duty(1229)
+  HAL_GPIO_WritePin(DIR_Port.port, DIR_Port.pin, GPIO_PIN_RESET);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  set_duty(1229)
 
   // Enable UART
-  HAL_UART_Transmit(&huart1, "\r\n", 2, 200);
+  HAL_UART_Transmit(&huart1, "V0\r\n", 2, 200);
   temp_val = 0;
   // HAL_UART_Receive_IT(&huart1, Rx_data, 1);
   // set_point_position[1] = 800;
@@ -216,13 +219,6 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    char buffer_vec[16];
-    sprintf(buffer_vec, "V%.1f\r\n", temp_val);  // One decimal place
-    // or 
-    // sprintf(buffer_vec, "V%.2f\r\n", temp_val);  // Two decimal places
-    HAL_UART_Transmit(&huart1, (uint8_t*)buffer_vec, strlen(buffer_vec), 10);
-    temp_val += 0.1;
-    HAL_Delay(50);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -529,7 +525,7 @@ PIDOutputType digital_PID(PIDState *pid_state,          // Store previous state 
   // Activate anti-windup (if allowed)
   if (pid_state->allow_windup)
   {
-    double e_reset = 0;
+    float e_reset = 0;
     if (Total_PID < -ref_val)
     {
       e_reset = -ref_val - Total_PID;
@@ -655,7 +651,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         const PIDOutputType velocity_ = digital_PID(&velocity_pid,
                                                     set_point_velocity[0],
                                                     encoder_1.Current_Vec,
-                                                    1);
+                                                    (float)htim3.Instance->ARR); // 1599
 
         // Control motor
         if (velocity_.dir)      // forward scenario
@@ -663,59 +659,54 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         else                    // reverse
             HAL_GPIO_WritePin(DIR_Port.port, DIR_Port.pin, GPIO_PIN_RESET);
 
-        set_duty((uint16_t)(velocity_.Total_PID * htim3.Instance->ARR))
+        set_duty((uint16_t)(velocity_.Total_PID));
 
-        char buffer_vec[16];
-        sprintf(buffer_vec, "V%f\r\n", encoder_1.Current_Vec);
-        HAL_UART_Transmit(&huart1, (uint8_t*)buffer_vec, sizeof(buffer_vec), 5);
-    }
-    if (htim->Instance == TIM5)     // transmit data using TIM5 Interrupt
-    {
-        // compute_velocity();
-        char buffer_vec[16];
-        // sprintf(buffer_vec, "V%f\r\n", encoder_1.Current_Vec);
-        sprintf(buffer_vec, "V%f\r\n", (float)temp_val);
-        HAL_UART_Transmit(&huart1, (uint8_t*)buffer_vec, sizeof(buffer_vec), 10);
-        temp_val += 1;
+        char buffer_vec[0x1F] = {0};
+        sprintf(buffer_vec, "U%.2fV%.2f\r\n", encoder_1.Current_Pos, encoder_1.Current_Vec);
+        HAL_UART_Transmit(&huart1, buffer_vec, strlen(buffer_vec), 5);
+
+        // sprintf(buffer_vec, "U%.2f\r\n", encoder_1.Current_Pos);
+        // HAL_UART_Transmit(&huart1, buffer_vec, strlen(buffer_vec), 5);
     }
 }
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART1)
-    {
-        switch (Rx_data[0]) {
-            case 'r':
-                // Start
-                break;
-            case 'e':
-                // Stop
-                break;
-            case 'g':
-                // resume (after pause)
-                break;
-            case 'f':
-                // pause
-                break;
-            case 'a':
-                // set vec and pos
-                int i;
-                uint8_t buffer_vec[0xF] = {0};
-                i = 0;
-                while (buffer_vec[i] != 's')
-                    HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
 
-                set_point_position[0] = (float)strtod((char *)buffer_vec + 1, NULL);
-
-                buffer_vec[0] = 0;
-                i = 0;
-                while (buffer_vec[i] != 'v')
-                    HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
-
-                set_point_velocity[0] = (float)strtod((char *)buffer_vec + 1, NULL);
-                break;
-        }
-    }
-}
+// void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+// {
+//     if (huart->Instance == USART1)
+//     {
+//         switch (Rx_data[0]) {
+//             case 'r':
+//                 // Start
+//                 break;
+//             case 'e':
+//                 // Stop
+//                 break;
+//             case 'g':
+//                 // resume (after pause)
+//                 break;
+//             case 'f':
+//                 // pause
+//                 break;
+//             case 'a':
+//                 // set vec and pos
+//                 int i;
+//                 uint8_t buffer_vec[0xF] = {0};
+//                 i = 0;
+//                 while (buffer_vec[i] != 's')
+//                     HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
+//
+//                 set_point_position[0] = (float)strtod((char *)buffer_vec + 1, NULL);
+//
+//                 buffer_vec[0] = 0;
+//                 i = 0;
+//                 while (buffer_vec[i] != 'v')
+//                     HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
+//
+//                 set_point_velocity[0] = (float)strtod((char *)buffer_vec + 1, NULL);
+//                 break;
+//         }
+//     }
+// }
 /* USER CODE END 4 */
 
 /**
