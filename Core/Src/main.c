@@ -175,8 +175,13 @@ int main(void)
   MX_TIM5_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-  HAL_TIM_Base_Start(&htim5);
+  HAL_TIM_Base_Start_IT(&htim5);
+
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+  set_point_velocity = 100;
+  HAL_UART_Transmit(&huart1, "V0\r\n", 4, 8);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -363,8 +368,8 @@ static void MX_USART1_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -387,8 +392,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -461,7 +473,7 @@ PIDOutputType digital_PID(PIDState *pid_state,          // Store previous state 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   // Handle EXTERNAL interrupts for Channel A and Channel B (PB4, PB6)
-  if (GPIO_Pin == GPIO_PIN_4 || GPIO_Pin == GPIO_PIN_6)
+  if (GPIO_Pin == GPIO_PIN_4)
   {
     // Update State of encoder
     char encoder_state =
@@ -534,11 +546,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM5)     // transmit data using TIM5 Interrupt
     {
-        // Compute velocity
-        compute_velocity();
+      // Compute velocity
+      compute_velocity();
 
     	// Compute PID
-    	PIDOutputType vec_result = digital_PID(&velocity_pid, set_point_velocity, encoder.Current_Vec, 1599);
+    	PIDOutputType vec_result = digital_PID(&velocity_pid, set_point_velocity, encoder.Current_Vec, 331);
 
     	// set direction
     	if (vec_result.dir == 1)
@@ -551,49 +563,50 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     	}
 
     	// set velocity
-    	set_duty((int)(vec_result.Total_PID * 1599))
+    	set_duty((int)(vec_result.Total_PID * 1599 / 331))
 
     	// transmit the velocity
     	char buffer_vec[0xF] = {0};
-    	sprintf(buffer_vec, "V%.2f\r\n", vec_result.Total_PID);
+    	sprintf(buffer_vec, "V%.2f\r\n", vec_result.Total_PID * 1599 / 331);
     	HAL_UART_Transmit(&huart1, buffer_vec, strlen(buffer_vec), 8);
     }
 }
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART1)
-    {
-        switch (Rx_data[0]) {
-            case 'r':
-                // Start
-                break;
-            case 'e':
-                // Stop
-                break;
-            case 'g':
-                // resume (after pause)
-                break;
-            case 'f':
-                // pause
-                break;
-            case 'a':
-                // set vec and pos
-                int i;
-                uint8_t buffer_vec[0xF] = {0};
-                i = 0;
-                while (buffer_vec[i] != 's')
-                    HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
 
-                buffer_vec[0] = 0;
-                i = 0;
-                while (buffer_vec[i] != 'v')
-                    HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
-
-                set_point_velocity = (float)strtod((char *)buffer_vec + 1, NULL);
-                break;
-        }
-    }
-}
+// void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+// {
+//     if (huart->Instance == USART1)
+//     {
+//         switch (Rx_data[0]) {
+//             case 'r':
+//                 // Start
+//                 break;
+//             case 'e':
+//                 // Stop
+//                 break;
+//             case 'g':
+//                 // resume (after pause)
+//                 break;
+//             case 'f':
+//                 // pause
+//                 break;
+//             case 'a':
+//                 // set vec and pos
+//                 int i;
+//                 uint8_t buffer_vec[0xF] = {0};
+//                 i = 0;
+//                 while (buffer_vec[i] != 's')
+//                     HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
+//
+//                 buffer_vec[0] = 0;
+//                 i = 0;
+//                 while (buffer_vec[i] != 'v')
+//                     HAL_UART_Receive(&huart1, &buffer_vec[i++], 1, 5);
+//
+//                 set_point_velocity = (float)strtod((char *)buffer_vec + 1, NULL);
+//                 break;
+//         }
+//     }
+// }
 /* USER CODE END 4 */
 
 /**
