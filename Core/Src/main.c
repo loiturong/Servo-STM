@@ -107,13 +107,17 @@ EncoderState encoder = {.previous_encoder_state = 0b00,
                           .Current_Vec = 0};
 
 // initialize the PID controller parameter
+const float Kc = 10;
+const float Tau_i = 0.06;
+const float K = 33.1;
+
 PIDState velocity_pid = {
   .Ui_previous = 0,
   .Ud_previous = 0,
   .ek_previous = 0,
   .Ts = (float)0.01,
-  .Kp = 1,
-  .Ki = 1,
+  .Kp = Kc / (K * Tau_i),
+  .Ki = Kc / K,
   .Kd = 0,
   .alpha = 0,
   .Kb = 1,
@@ -175,12 +179,12 @@ int main(void)
   MX_TIM5_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+  set_point_velocity = 300;
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
   HAL_TIM_Base_Start_IT(&htim5);
 
-  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
-  set_point_velocity = 100;
   HAL_UART_Transmit(&huart1, "V0\r\n", 4, 8);
   /* USER CODE END 2 */
 
@@ -550,7 +554,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       compute_velocity();
 
     	// Compute PID
-    	PIDOutputType vec_result = digital_PID(&velocity_pid, set_point_velocity, encoder.Current_Vec, 331);
+    	PIDOutputType vec_result = digital_PID(&velocity_pid, set_point_velocity, encoder.Current_Vec, 1599);
 
     	// set direction
     	if (vec_result.dir == 1)
@@ -563,12 +567,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     	}
 
     	// set velocity
-    	set_duty((int)(vec_result.Total_PID * 1599 / 331))
+    	set_duty((int)vec_result.Total_PID)
 
     	// transmit the velocity
-    	char buffer_vec[0xF] = {0};
-    	sprintf(buffer_vec, "V%.2f\r\n", vec_result.Total_PID * 1599 / 331);
-    	HAL_UART_Transmit(&huart1, buffer_vec, strlen(buffer_vec), 8);
+    	char buffer_vec[0x1F] = {0};
+    	sprintf(buffer_vec, "V%.2f\r\n", encoder.Current_Vec);
+    	HAL_UART_Transmit(&huart1, buffer_vec, strlen(buffer_vec), 10);
     }
 }
 
